@@ -72,6 +72,12 @@
             { slot: ['23A', '23B'] },
             { slot: ['25A', '25B'] }
         ];
+        const initFloors = [
+            { floor: 0, name: "basement", img: './floor_0.png' },
+            { floor: 1, name: "main floor", img: './floor_1.png' },
+            { floor: 2, name: "upstairs", img: './floor_2.png' }
+        ];
+        let activeFloor = 0;
     </script>
     <style>
         .controlArea {
@@ -221,6 +227,7 @@
                 addSlots([...slots])
             })
         }
+
         function addSlots(slotMap) {
             // we'll use a set to store existing results to prevent duplicates
             const currentPanel = new Set();
@@ -237,17 +244,17 @@
                     }
                 });
             });
-
         }
+
     </script>
     <div class="controlArea">
         <button onclick="addBreakers(initBreakers)">Add Breakers</button>
-        <button>Add Component</button>
+        <button onclick="showNextFloor(activeFloor)">Next Floor</button>
     </div>
 
     <div class="displayArea">
-        <canvas id="breakerList"></canvas>
-        <canvas id="componentList"></canvas>
+        <canvas id="breakerList" style="position:absolute; top:100px;"></canvas>
+        <canvas id="componentList" style="position:absolute; top:50px;"></canvas>
     </div>
     <script>
         // Rendering Engine
@@ -319,13 +326,41 @@
                         breakerContext.fillText(elem.id, leftSide + stdWidth / 2, yPos(num - 1, offset) - fontHeight / 2);
                     } else {
                         // right side, some juggling to get things to line up right
-                        breakerContext.fillRect(rightSide + 1, 1 + yPos(num-1, offset), stdWidth - 2, stdHeight - 2);
+                        breakerContext.fillRect(rightSide + 1, 1 + yPos(num - 1, offset), stdWidth - 2, stdHeight - 2);
                         breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
                         breakerContext.fillText(elem.id, rightSide + stdWidth / 2, yPos(num - 2, offset) - fontHeight / 2);
                     }
                 });
             });
         }
+        // components
+        function showNextFloor(prevFloor) {
+            activeFloor = prevFloor + 1 >= initFloors.length ? 0 : prevFloor + 1;
+            let img = new Image();
+            img.src = initFloors[activeFloor].img;
+            img.addEventListener('load', () => {
+                const components = document.getElementById('componentList');
+                components.height = img.height;
+                components.width = img.width;
+                components.style.left = `${20 + stdWidth + 30 + stdWidth + 20 + 15}px`;
+                const componentContext = components.getContext('2d');
+                // draw the base image
+                componentContext.drawImage(img, 0, 0);
+                componentContext.font = '64px Verdana';
+                componentContext.textAlign = 'center';
+                componentContext.fillText(initFloors[activeFloor].name, img.width/2, 50);
+                // listen to mouse clicks to add components
+                // onClick, ask user what action they want to take
+                // on unused area:
+                // dropOutlet, dropFixture, dropSwitch
+                // if on component
+                // connectSwitch (2 clicks)
+                // assignCircuit
+                // editComponent
+            });
+        }
+
+        showNextFloor(activeFloor);
     </script>
 </body>
 
