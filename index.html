@@ -253,63 +253,77 @@
         // Rendering Engine
 
         // panel element sizes on canvas
-        const boxHeight = 640;
-        const leftSide = 15;
-        const rightSide = 102.5;
         const stdWidth = 65;
         const stdHeight = 20;
+        const boxHeight = 32 * stdHeight;
+        const leftSide = 20;
+        const rightSide = leftSide + stdWidth + 30;
         const fontHeight = 12;
 
         const breakers = document.getElementById('breakerList');
         breakers.height = boxHeight + 60;
-        // panel width = 15+65+15+65+15
-        breakers.width = rightSide + stdWidth + 30 + 20;
+        // panel width = 20+65+30+65+20
+        breakers.width = 20 + stdWidth + 30 + stdWidth + 20;
         const breakerContext = breakers.getContext('2d');
 
         async function showRecords() {
             const recordList = await getRecord('breakers', {});
 
             breakerContext.fillStyle = 'lightgrey';
-            breakerContext.fillRect(0, 0, 180, boxHeight + 2 * stdHeight + 20);
+            breakerContext.fillRect(0, 0, 20 + stdWidth + 30 + stdWidth + 20, boxHeight + 2 * stdHeight + 20);
 
             // note the origin for the panel is bottom left
             // canvas origin is top left
-            const yPos = (breaker, offset) => boxHeight + 10 - (stdHeight * (breaker - 1)) - offset;
+            const yPos = (breaker, offset) => boxHeight + 10 + stdHeight - (stdHeight * breaker + offset);
 
             // first fill in blank panel slots
-            
+
             breakerContext.fillStyle = 'darkgrey';
             for (let num = 0; num <= 32; num++) {
-                if (num == 1 || num % 2 == 0) {
-                    breakerContext.fillRect(leftSide+1, 1+yPos(num, num == 1 ? -stdHeight : 0), stdWidth-2, stdHeight-2);
-                    breakerContext.fillRect(leftSide+1, 1+yPos(num, num == 1 ? 0 : stdHeight), stdWidth-2, stdHeight-2);
+                if (num % 2 == 0) {
+                    breakerContext.textAlign = 'end';
+                    breakerContext.fillRect(leftSide + 1, 1 + yPos(num, num == 1 ? -stdHeight : 0), stdWidth - 2, stdHeight - 2);
+                    breakerContext.fillText(`${num == 0 ? 1 : num}A`, leftSide, yPos(num, -stdHeight) - fontHeight / 2);
+                    breakerContext.fillRect(leftSide + 1, 1 + yPos(num, num == 1 ? 0 : stdHeight), stdWidth - 2, stdHeight - 2);
+                    breakerContext.fillText(`${num == 0 ? 1 : num}B`, leftSide, yPos(num, 0) - fontHeight / 2);
                 } else {
-                    breakerContext.fillRect(rightSide+1, 1+yPos(num, -stdHeight), stdWidth-2, stdHeight-2);
-                    breakerContext.fillRect(rightSide+1, 1+yPos(num, 0), stdWidth-2, stdHeight-2);
+                    breakerContext.textAlign = 'start';
+                    breakerContext.fillRect(rightSide + 1, 1 + yPos(num, -stdHeight), stdWidth - 2, stdHeight - 2);
+                    breakerContext.fillText(`${num + 2}A`, rightSide + stdWidth, yPos(num, 0) - fontHeight / 2);
+                    breakerContext.fillRect(rightSide + 1, 1 + yPos(num, 0), stdWidth - 2, stdHeight - 2);
+                    breakerContext.fillText(`${num + 2}B`, rightSide + stdWidth, yPos(num, stdHeight) - fontHeight / 2);
                 }
             }
             // now draw over filled breakers
             breakerContext.strokeStyle = 'black';
+            breakerContext.textAlign = 'center';
+            const drawBreaker = (slotName, elem, mode = 'box') => {
+
+            }
             recordList.forEach(elem => {
                 elem.slot.forEach(slotName => {
                     const num = 1 * slotName.slice(0, -1);
                     const offset = slotName.slice(-1) == 'A' ? 0 : stdHeight;
                     breakerContext.font = `${fontHeight}px Verdana`;
-                    if (num == 1 || num % 2 == 0) {
-                        // left side, some juggling to get things to line up right
-                        breakerContext.fillStyle = elem.slot.length > 1 ? 'white' : '#e2f5e4';
-                        breakerContext.fillRect(leftSide+1, 1+yPos(num, num == 1 ? offset - stdHeight : offset), stdWidth-2, stdHeight-2);
+                    breakerContext.fillStyle = elem.slot.length > 1 ? '#ffffffee' : '#e2f5e455';
+                    if (num == 1) {
+                        // first, breaker 1 is a special case since it's on the left side
+                        breakerContext.fillRect(leftSide + 1, 1 + yPos(0, offset), stdWidth - 2, stdHeight - 2);
                         breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
-                        breakerContext.fillText(elem.id, leftSide + 10, yPos(num, num == 1 ? offset - stdHeight - fontHeight : offset - fontHeight));
+                        breakerContext.fillText(elem.id, leftSide + stdWidth / 2, yPos(0, offset - stdHeight) - fontHeight / 2);
+
+                    } else if (num % 2 == 0) {
+                        // left side, some juggling to get things to line up right
+                        breakerContext.fillRect(leftSide + 1, 1 + yPos(num, offset), stdWidth - 2, stdHeight - 2);
+                        breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
+                        breakerContext.fillText(elem.id, leftSide + stdWidth / 2, yPos(num - 1, offset) - fontHeight / 2);
                     } else {
                         // right side, some juggling to get things to line up right
-                        breakerContext.fillStyle = elem.slot.length > 1 ? 'white' : '#e2f5e4';
-                        breakerContext.fillRect(rightSide+1, 1+yPos(num, offset - stdHeight), stdWidth-2, stdHeight-2);
+                        breakerContext.fillRect(rightSide + 1, 1 + yPos(num-1, offset), stdWidth - 2, stdHeight - 2);
                         breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
-                        breakerContext.fillText(elem.id, rightSide + 10, yPos(num, offset - stdHeight - fontHeight));
+                        breakerContext.fillText(elem.id, rightSide + stdWidth / 2, yPos(num - 2, offset) - fontHeight / 2);
                     }
-
-                })
+                });
             });
         }
     </script>
