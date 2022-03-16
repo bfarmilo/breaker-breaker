@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Breaker-Breaker</title>
+    <script>
+        const DB_VERSION = 4;
+        /* Schema Version 4
+        components: [{
+            id:1,
+            type: "plug|switch|fixture",
+            breaker: 1, //breaker id
+            floor:1,
+            location: {x:100, y:300, z:30}, //x, y relative to origin, z relative to floor
+            gfci: true, //only used for outlets or breakers
+            numPoles:0, //only used for switches
+            isDimmed:false, //only used for switches
+            switchedCircuit:[] //list of id's of devices on this switch
+        }]
+
+        breakers: [{
+            id:1,
+            volts:120|240,
+            amps:15,
+            gfci:true,
+            slots:['1A', '1B']
+        }]
+
+        panelSlots: [{
+            slot:'1A',
+            breaker:1
+        }]
+
+        rooms: [{
+            id:1,
+            floor:1,
+            type:"bedroom|bathroom|hallway|stairwell...",
+            location: {x:100, y:200, z:0} //bottom-left corner relative to origin
+            boundingBox: {x:240, y:200, z:108} //bounding box of room
+        }] 
+        */
+        const initBreakers = [
+            { slot: ['1A', '1B'], amps: 20 },
+            { slot: ['2A', '2B'] },
+            { slot: ['4A', '4B'], amps: 20 },
+            { slot: ['6A'], amps: 15 },
+            { slot: ['6B', '8A'], amps: 30, volts: 240 },
+            { slot: ['8B'] },
+            { slot: ['10A', '10B'] },
+            { slot: ['12A'] },
+            { slot: ['12B'] },
+            { slot: ['14A', '14B'] },
+            { slot: ['16A', '16B'], gfci: true },
+            { slot: ['18A', '18B'], gfci: true },
+            { slot: ['20A', '20B'], gfci: true },
+            { slot: ['30A', '30B', '32A', '32B'], amps: 30, volts: 240 },
+            { slot: ['3A', '3B'] },
+            { slot: ['5A', '5B'] },
+            { slot: ['7A', '7B'] },
+            { slot: ['9A'] },
+            { slot: ['9B'] },
+            { slot: ['11A'] },
+            { slot: ['11B'] },
+            { slot: ['13A'] },
+            { slot: ['13B', '15A'], amps: 40, volts: 240 },
+            { slot: ['15B'] },
+            { slot: ['17A', '17B'], amps: 20 },
+            { slot: ['19A', '19B', '21A', '21B'], amps: 40, volts: 240 },
+            { slot: ['23A', '23B'] },
+            { slot: ['25A', '25B'] }
+        ];
+    </script>
+    <style>
+        .controlArea {
+            width: 100%;
+        }
+
+        .displayArea {
+            background-color: aliceblue;
+        }
+    </style>
+</head>
+
+<body>
+    <script>
+        // Database engine
+        if (!window.indexedDB) {
+            console.log("Your browser doesn't support a stable version of IndexedDB. Such and such feature will not be available.");
+        }
+        let db;
+        const request = indexedDB.open("BreakerBreaker", DB_VERSION);
+        request.onerror = event => {
+            console.log("Why didn't you allow my web app to use IndexedDB?!");
+        };
+        request.onsuccess = event => {
+            db = event.target.result;
+            db.onerror = event => {
+                // Generic error handler for all errors targeted at this database's
+                // requests!
+                console.error("Database error: " + event.target.errorCode);
+            };
+            showRecords();
+        };
+        // This event is only implemented in recent browsers
+        request.onupgradeneeded = event => {
+            // Save the IDBDatabase interface
+            const database = event.target.result;
+            switch (database.version) {
+                // Create objectStores for this database
+                case 1:
+                    // breakers, no index needed
+                    database.createObjectStore("breakers", { autoIncrement: true });
+                    // components, search by breaker and floor as well as component index
+                    const components = database.createObjectStore("components", { autoIncrement: true });
+                    components.createIndex("circuits", "breaker", { unique: false });
+                    components.createIndex("floor", "floor", { unique: false });
+                    // rooms, search by floor and room index
+                    const rooms = database.createObjectStore("rooms", { autoIncrement: true });
+                    rooms.createIndex("roomFloor", "floor", { unique: false });
+                    break;
+                case 2:
+                    break;
+                case 3:
+                    // add in panel slots, can search by breaker
+                    const panelSlots = database.createObjectStore("panelSlots", { keyPath: "slot", unique: true });
+                    panelSlots.createIndex("breaker", "breaker", { unique: false });
+                    panelSlots.transaction.oncomplete = e => {
+                        const defaultSlots = new Map();
+                        for (let i = 1; i <= 32; i++) {
+                            defaultSlots.set(`${i}A`, 0);
+                            defaultSlots.set(`${i}B`, 0);
+                        }
+                        addSlots([...defaultSlots]);
+                    }
+                    break;
+                case 4:
+                    database.deleteObjectStore('breakers');
+                    database.deleteObjectStore('components');
+                    database.deleteObjectStore('rooms');
+                    // breakers, no index needed
+                    database.createObjectStore("breakers", { keyPath: 'id', unique: true });
+                    // components, search by breaker and floor as well as component index
+                    const components_v4 = database.createObjectStore("components", { keyPath: 'id', unique: true });
+                    components_v4.createIndex("circuits", "breaker", { unique: false });
+                    components_v4.createIndex("floor", "floor", { unique: false });
+                    // rooms, search by floor and room index
+                    const rooms_v4 = database.createObjectStore("rooms", { keyPath: 'id', unique: true });
+                    rooms_v4.createIndex("roomFloor", "floor", { unique: false });
+                    break;
+            }
+        };
+
+
+        const addRecord = (collection, newData, insertOnly = false) => new Promise((resolve, reject) => {
+            const currentValues = new Set();
+            // turn into an array of the form [[key, value]]
+            const recordList = collection == 'panelSlots' ? newData.map(entry => [entry.slot, entry]) : newData.map((entry, id) => ([entry.id || id, entry]));
+            return getRecord(collection).then(result => {
+                const dataStore = db.transaction(collection, "readwrite").objectStore(collection);
+                // now add each entry to the set
+                result.forEach(record => currentValues.add(collection == 'panelSlots' ? record.slot : record.id));
+                // populate with panel slots but with no breaker entry
+                return Promise.all(recordList.map(([id, payload]) => {
+                    const newRecord = collection == 'panelSlots' ? { ...payload } : { ...payload, id }
+                    if (!insertOnly && currentValues.has(id)) {
+                        const update = dataStore.put(newRecord);
+                        update.oncomplete = e => resolve(e.target.result);
+                        update.onerror = e => reject(e.target.error);
+                    } else {
+                        const insert = dataStore.add(newRecord);
+                        insert.oncomplete = e => resolve(e.target.result);
+                        insert.onerror = e => reject(e.target.error);
+                    }
+                }));
+            });
+        });
+
+
+        const getRecord = (collection, query = {}) => new Promise((resolve, reject) => {
+            let index;
+            const lookup = Object.keys(query) && Object.keys(query)[0];
+            if (collection == 'components') {
+                if (lookup == 'breaker') index = 'circuits';
+                if (lookup == 'floor') index = 'floor';
+            } else if (collection == 'rooms') {
+                if (lookup == 'floor') index = 'roomFloor';
+            }
+            const transaction = db.transaction(collection);
+            transaction.onerror = e => reject(e.target.errorCode);
+            // simple queries, where an index exists
+            if (index) {
+                transaction.objectStore(collection).index(index).getAll(query[lookup]).onsuccess = e => resolve(e.target.result);
+            } else if (lookup) {
+                transaction.objectStore(collection).get(query[lookup]).onsuccess = e => resolve(e.target.result);
+            } else {
+                transaction.objectStore(collection).getAll().onsuccess = e => resolve(e.target.result);
+            }
+        });
+    </script>
+    <script>
+        // intializing functions
+
+        function addBreakers(breakerList) {
+            // we'll store the slots in a map for later insertion, 
+            // since there can only be one readwrite transaction open at a time
+            const slots = new Map();
+
+            // define defaults for breakers
+            const stdBreaker = { amps: 15, volts: 120, gfci: false };
+
+            // now add each entry to the indexedDB
+            addRecord('breakers', breakerList.map(entry => ({ ...stdBreaker, ...entry }))).then(result => {
+                // result is an array of id's of updated or inserted records
+                result.map(breakerID => {
+                    const fullRecord = breakerList.get(breakerID);
+                    fullRecord.slots.forEach(slot => slots.set(slot, fullRecord.breaker));
+                });
+                addSlots([...slots])
+            })
+        }
+        function addSlots(slotMap) {
+            // we'll use a set to store existing results to prevent duplicates
+            const currentPanel = new Set();
+            getRecord("panelSlots").then(result => {
+                const panelStore = db.transaction("panelSlots", "readwrite").objectStore("panelSlots");
+                // now add each entry to the currentPanel Set
+                result.forEach(record => currentPanel.add(record.slot));
+                // populate with panel slots but with no breaker entry
+                slotMap.forEach(([slot, breaker]) => {
+                    if (currentPanel.has(slot)) {
+                        panelStore.put({ slot, breaker });
+                    } else {
+                        panelStore.add({ slot, breaker });
+                    }
+                });
+            });
+
+        }
+    </script>
+    <div class="controlArea">
+        <button onclick="addBreakers(initBreakers)">Add Breakers</button>
+        <button>Add Component</button>
+    </div>
+
+    <div class="displayArea">
+        <canvas id="breakerList"></canvas>
+        <canvas id="componentList"></canvas>
+    </div>
+    <script>
+        // Rendering Engine
+
+        // panel element sizes on canvas
+        const boxHeight = 640;
+        const leftSide = 15;
+        const rightSide = 102.5;
+        const stdWidth = 65;
+        const stdHeight = 20;
+        const fontHeight = 12;
+
+        const breakers = document.getElementById('breakerList');
+        breakers.height = boxHeight + 60;
+        // panel width = 15+65+15+65+15
+        breakers.width = rightSide + stdWidth + 30 + 20;
+        const breakerContext = breakers.getContext('2d');
+
+        async function showRecords() {
+            const recordList = await getRecord('breakers', {});
+
+            breakerContext.fillStyle = 'lightgrey';
+            breakerContext.fillRect(0, 0, 180, boxHeight + 2 * stdHeight + 20);
+
+            // note the origin for the panel is bottom left
+            // canvas origin is top left
+            const yPos = (breaker, offset) => boxHeight + 10 - (stdHeight * (breaker - 1)) - offset;
+
+            // first fill in blank panel slots
+            
+            breakerContext.fillStyle = 'darkgrey';
+            for (let num = 0; num <= 32; num++) {
+                if (num == 1 || num % 2 == 0) {
+                    breakerContext.fillRect(leftSide+1, 1+yPos(num, num == 1 ? -stdHeight : 0), stdWidth-2, stdHeight-2);
+                    breakerContext.fillRect(leftSide+1, 1+yPos(num, num == 1 ? 0 : stdHeight), stdWidth-2, stdHeight-2);
+                } else {
+                    breakerContext.fillRect(rightSide+1, 1+yPos(num, -stdHeight), stdWidth-2, stdHeight-2);
+                    breakerContext.fillRect(rightSide+1, 1+yPos(num, 0), stdWidth-2, stdHeight-2);
+                }
+            }
+            // now draw over filled breakers
+            breakerContext.strokeStyle = 'black';
+            recordList.forEach(elem => {
+                elem.slot.forEach(slotName => {
+                    const num = 1 * slotName.slice(0, -1);
+                    const offset = slotName.slice(-1) == 'A' ? 0 : stdHeight;
+                    breakerContext.font = `${fontHeight}px Verdana`;
+                    if (num == 1 || num % 2 == 0) {
+                        // left side, some juggling to get things to line up right
+                        breakerContext.fillStyle = elem.slot.length > 1 ? 'white' : '#e2f5e4';
+                        breakerContext.fillRect(leftSide+1, 1+yPos(num, num == 1 ? offset - stdHeight : offset), stdWidth-2, stdHeight-2);
+                        breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
+                        breakerContext.fillText(elem.id, leftSide + 10, yPos(num, num == 1 ? offset - stdHeight - fontHeight : offset - fontHeight));
+                    } else {
+                        // right side, some juggling to get things to line up right
+                        breakerContext.fillStyle = elem.slot.length > 1 ? 'white' : '#e2f5e4';
+                        breakerContext.fillRect(rightSide+1, 1+yPos(num, offset - stdHeight), stdWidth-2, stdHeight-2);
+                        breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
+                        breakerContext.fillText(elem.id, rightSide + 10, yPos(num, offset - stdHeight - fontHeight));
+                    }
+
+                })
+            });
+        }
+    </script>
+</body>
+
+</html>
