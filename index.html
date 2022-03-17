@@ -79,18 +79,6 @@
         ];
         let activeFloor = 0;
     </script>
-    <style>
-        .controlArea {
-            width: 100%;
-        }
-
-        .displayArea {
-            background-color: aliceblue;
-        }
-    </style>
-</head>
-
-<body>
     <script>
         // Database engine
         if (!window.indexedDB) {
@@ -207,6 +195,42 @@
         });
     </script>
     <script>
+        // event handlers
+        window.addEventListener('mousedown', function (e) {
+            if (e.target.id == 'breakerList') {
+                const actX = e.clientX - e.target.offsetLeft;
+                const actY = e.clientY - e.target.offsetTop;
+                getRecord('breakers').then(breakers => {
+                    const breaker = breakers.filter(entry => {
+                        const { clickAreas } = entry;
+                        const hit = clickAreas.filter(([x0, y0, x1, y1]) => x0 < actX && actX < x1 && y0 < actY && actY < y1);
+                        return !!hit.length
+                    });
+                    if (breaker.length) {
+                        selectBreaker(breaker[0]);
+                    } else {
+                        selectBreaker(false);
+                    }
+                });
+            }
+            if (e.target.id == 'componentList') {
+                console.log('component click not available');
+            }
+        });
+    </script>
+    <style>
+        .controlArea {
+            width: 100%;
+        }
+
+        .displayArea {
+            background-color: aliceblue;
+        }
+    </style>
+</head>
+
+<body>
+    <script>
         // intializing functions
 
         function addBreakers(breakerList) {
@@ -266,6 +290,7 @@
         const leftSide = 20;
         const rightSide = leftSide + stdWidth + 30;
         const fontHeight = 12;
+        let recordList; // global copy of current recordlist
 
         const breakers = document.getElementById('breakerList');
         breakers.height = boxHeight + 60;
@@ -273,8 +298,30 @@
         breakers.width = 20 + stdWidth + 30 + stdWidth + 20;
         const breakerContext = breakers.getContext('2d');
 
-        async function showRecords() {
-            const recordList = await getRecord('breakers', {});
+        function selectBreaker(breaker) {
+            // redraw panel to clear old highlights
+            showRecords(breaker === false ? false : breaker.id);
+            //redraw components attached to this breaker
+            //showComponents(breaker.id);
+        }
+
+        async function showRecords(highlightID = false) {
+
+            const getBoundingBox = extents => {
+                // first element x0 is left
+                const x0 = extents[0][0];
+                // width is (first element x1) - x0
+                const width = extents[0][2] - x0;
+                // min y is bottom
+                const yVals = extents.flatMap(entry => ([entry[1], entry[3]]));
+                const y0 = Math.min(...yVals);
+                // max y - y0 is height
+                const height = Math.max(...yVals) - y0;
+                return [x0, y0, width, height];
+            }
+
+            const shouldReload = !recordList;
+            if (shouldReload) recordList = await getRecord('breakers', {});
 
             breakerContext.fillStyle = 'lightgrey';
             breakerContext.fillRect(0, 0, 20 + stdWidth + 30 + stdWidth + 20, boxHeight + 2 * stdHeight + 20);
@@ -287,6 +334,7 @@
 
             breakerContext.fillStyle = 'darkgrey';
             for (let num = 0; num <= 32; num++) {
+                breakerContext.font=`8px Verdana`;
                 if (num % 2 == 0) {
                     breakerContext.textAlign = 'end';
                     breakerContext.fillRect(leftSide + 1, 1 + yPos(num, num == 1 ? -stdHeight : 0), stdWidth - 2, stdHeight - 2);
@@ -304,34 +352,45 @@
             // now draw over filled breakers
             breakerContext.strokeStyle = 'black';
             breakerContext.textAlign = 'center';
-            const drawBreaker = (slotName, elem, mode = 'box') => {
-
-            }
             recordList.forEach(elem => {
+                const clickAreas = [];
                 elem.slot.forEach(slotName => {
                     const num = 1 * slotName.slice(0, -1);
                     const offset = slotName.slice(-1) == 'A' ? 0 : stdHeight;
                     breakerContext.font = `${fontHeight}px Verdana`;
                     breakerContext.fillStyle = elem.slot.length > 1 ? '#ffffffee' : '#e2f5e455';
+                    // calculate the position of the rect's and text
+                    let posX, posY, textX, textY;
                     if (num == 1) {
                         // first, breaker 1 is a special case since it's on the left side
-                        breakerContext.fillRect(leftSide + 1, 1 + yPos(0, offset), stdWidth - 2, stdHeight - 2);
-                        breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
-                        breakerContext.fillText(elem.id, leftSide + stdWidth / 2, yPos(0, offset - stdHeight) - fontHeight / 2);
-
+                        posX = leftSide;
+                        posY = yPos(0, offset);
+                        textX = leftSide + stdWidth / 2;
+                        textY = yPos(0, offset - stdHeight) - fontHeight / 2;
                     } else if (num % 2 == 0) {
                         // left side, some juggling to get things to line up right
-                        breakerContext.fillRect(leftSide + 1, 1 + yPos(num, offset), stdWidth - 2, stdHeight - 2);
-                        breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
-                        breakerContext.fillText(elem.id, leftSide + stdWidth / 2, yPos(num - 1, offset) - fontHeight / 2);
+                        posX = leftSide;
+                        posY = yPos(num, offset);
+                        textX = leftSide + stdWidth / 2;
+                        textY = yPos(num - 1, offset) - fontHeight / 2;
                     } else {
                         // right side, some juggling to get things to line up right
-                        breakerContext.fillRect(rightSide + 1, 1 + yPos(num - 1, offset), stdWidth - 2, stdHeight - 2);
-                        breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
-                        breakerContext.fillText(elem.id, rightSide + stdWidth / 2, yPos(num - 2, offset) - fontHeight / 2);
+                        posX = rightSide;
+                        posY = yPos(num - 1, offset);
+                        textX = rightSide + stdWidth / 2;
+                        textY = yPos(num - 2, offset) - fontHeight / 2;
                     }
+                    if (elem.id === highlightID) breakerContext.fillStyle = 'yellow';
+                    breakerContext.fillRect(posX + 1, posY + 1, stdWidth - 2, stdHeight - 2);
+                    breakerContext.fillStyle = elem.amps == 15 ? 'black' : 'darkgreen';
+                    breakerContext.fillText(elem.id, textX, textY);
+                    // TODO: Update database with the bounding rectangle(s) for the breaker for mouse event handling
+                    if (shouldReload) clickAreas.push([posX, posY, posX + stdWidth, posY + stdHeight]);
                 });
+                if (shouldReload) elem.clickAreas = clickAreas;
             });
+            // now update all of the records with their mouse positions
+            if (shouldReload) addRecord('breakers', recordList).then(result => console.log('breakers updated'));
         }
         // components
         function showNextFloor(prevFloor) {
@@ -348,7 +407,7 @@
                 componentContext.drawImage(img, 0, 0);
                 componentContext.font = '64px Verdana';
                 componentContext.textAlign = 'center';
-                componentContext.fillText(initFloors[activeFloor].name, img.width/2, 50);
+                componentContext.fillText(initFloors[activeFloor].name, img.width / 2, 50);
                 // listen to mouse clicks to add components
                 // onClick, ask user what action they want to take
                 // on unused area:
@@ -361,6 +420,9 @@
         }
 
         showNextFloor(activeFloor);
+    </script>
+    <script>
+
     </script>
 </body>
 
