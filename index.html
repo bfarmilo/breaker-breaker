@@ -7,18 +7,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Breaker-Breaker</title>
     <script>
+        const PLUG_RADIUS = 5;
+        const FIXTURE_RADIUS = 10;
         const DB_VERSION = 4;
+        const BOUNDING_BOX_MARGIN = 3;
         /* Schema Version 4
         components: [{
             id:1,
             type: "plug|switch|fixture",
             breaker: 1, //breaker id
             floor:1,
-            location: {x:100, y:300, z:30}, //x, y relative to origin, z relative to floor
+            location: [x, y, z], //x, y relative to canvas, z relative to floor
             gfci: true, //only used for outlets or breakers
             numPoles:0, //only used for switches
             isDimmed:false, //only used for switches
             switchedCircuit:[] //list of id's of devices on this switch
+            clickAreas:[[x0,y0,x1,y1]] // bounding box of component for click detection
         }]
 
         breakers: [{
@@ -26,7 +30,8 @@
             volts:120|240,
             amps:15,
             gfci:true,
-            slots:['1A', '1B']
+            slots:['1A', '1B'],
+            clickAreas:[[x0,y0,x1,y1]] //define a bounding box for a clickable component
         }]
 
         panelSlots: [{
@@ -38,8 +43,8 @@
             id:1,
             floor:1,
             type:"bedroom|bathroom|hallway|stairwell...",
-            location: {x:100, y:200, z:0} //bottom-left corner relative to origin
-            boundingBox: {x:240, y:200, z:108} //bounding box of room
+            location: [x, y, z] //bottom-left corner relative to origin
+            boundingBox: [x0, y0, x1,y1] //bounding box of room
         }] 
         */
         const initBreakers = [
@@ -77,9 +82,95 @@
             { floor: 1, name: "main floor", img: './floor_1.png' },
             { floor: 2, name: "upstairs", img: './floor_2.png' }
         ];
-        let activeFloor = 0;
+        const types = {
+            outlet: {
+                name: 'outlet',
+                width: PLUG_RADIUS,
+                height: PLUG_RADIUS,
+                img: (ctx, [x0, y0], color) => {
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(x0, y0, PLUG_RADIUS, 0, Math.PI * 2, true);
+                    ctx.fill();
+                }
+            },
+            switch: {
+                name: 'switch',
+                width: 10,
+                height: 10,
+                img: (ctx, [x0, y0], color, annotation) => {
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x0, y0, 10, 10);
+                    if (annotation) {
+                        ctx.font = '8px Verdana';
+                        ctx.textAlign = 'start';
+                        ctx.textBaseline = 'top';
+                        ctx.fillText(annotation, x0 + 10, y0 + 10,);
+                    }
+                }
+            },
+            fixture: {
+                name: 'fixture',
+                width: FIXTURE_RADIUS,
+                height: FIXTURE_RADIUS,
+                img: (ctx, [x0, y0], color) => {
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(x0, y0, FIXTURE_RADIUS, 0, Math.PI * 2, true);
+                    ctx.fill();
+                }
+            }
+        };
+        const appState = {
+            activeFloor: 1,
+            activeMode: 'add',
+            activeType: 'outlet',
+            firstComponent: '',
+            highlightList: []
+        };
     </script>
-    <script>
+    <script id="helperFunctions">
+        function handleErr(err) { console.error(err) };
+
+        function createUUID() {
+            return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11).replace(/[018]/g, c =>
+                (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
+            )
+        }
+
+        function getBoundingBox(extents) {
+            const xVals = extents.flatMap(entry => entry.filter((coords, idx) => idx % 2 == 0));
+            // first element x0 is left
+            const x0 = Math.min(...xVals);
+            // width is (first element x1) - x0
+            const width = Math.max(...xVals) - x0;
+            // pick out all of the y values from the input array (odd indices of any each vector)
+            const yVals = extents.flatMap(entry => entry.filter((coords, idx) => (idx + 1) % 2 == 0));
+            // min y is bottom
+            const y0 = Math.min(...yVals);
+            // max y - y0 is height
+            const height = Math.max(...yVals) - y0;
+            return [x0, y0, width, height];
+        }
+
+        function setState(newState) {
+            const updateKeys = Object.keys(newState);
+            console.log(`switching from ${JSON.stringify(appState)} to ${JSON.stringify(newState)}`);
+            updateKeys.forEach(key => appState[key] = newState[key]);
+        }
+
+        function checkHit(clickCoordinates, elements) {
+            const [actX, actY] = clickCoordinates;
+            const [result] = elements.filter(entry => {
+                const { clickAreas } = entry;
+                const hit = clickAreas.filter(([x0, y0, x1, y1]) => x0 <= actX && actX <= x1 && y0 <= actY && actY <= y1);
+                return !!hit.length;
+            });
+            return result ? result : false;
+        }
+
+    </script>
+    <script id="databaseEngine">
         // Database engine
         if (!window.indexedDB) {
             console.log("Your browser doesn't support a stable version of IndexedDB. Such and such feature will not be available.");
@@ -96,7 +187,10 @@
                 // requests!
                 console.error("Database error: " + event.target.errorCode);
             };
-            showRecords();
+            // now that the DB is ready, populate the canvases
+            showPanel();
+            console.log('request.onsuccess calling for floor render');
+            showFloor(appState.activeFloor);
         };
         // This event is only implemented in recent browsers
         request.onupgradeneeded = event => {
@@ -153,22 +247,21 @@
             // turn into an array of the form [[key, value]]
             const recordList = collection == 'panelSlots' ? newData.map(entry => [entry.slot, entry]) : newData.map((entry, id) => ([entry.id || id, entry]));
             return getRecord(collection).then(result => {
-                const dataStore = db.transaction(collection, "readwrite").objectStore(collection);
+                const dataStore = db.transaction(collection, "readwrite");
+                dataStore.oncomplete = e => resolve(e.target.result);
+                dataStore.onerror = e => reject(e.target.error);
                 // now add each entry to the set
                 result.forEach(record => currentValues.add(collection == 'panelSlots' ? record.slot : record.id));
                 // populate with panel slots but with no breaker entry
-                return Promise.all(recordList.map(([id, payload]) => {
+                recordList.map(([id, payload]) => {
                     const newRecord = collection == 'panelSlots' ? { ...payload } : { ...payload, id }
                     if (!insertOnly && currentValues.has(id)) {
-                        const update = dataStore.put(newRecord);
-                        update.oncomplete = e => resolve(e.target.result);
-                        update.onerror = e => reject(e.target.error);
+                        const update = dataStore.objectStore(collection).put(newRecord);
                     } else {
-                        const insert = dataStore.add(newRecord);
-                        insert.oncomplete = e => resolve(e.target.result);
-                        insert.onerror = e => reject(e.target.error);
+                        // use uuid for id to prevent collisions
+                        const insert = dataStore.objectStore(collection).add({ ...newRecord, id: createUUID() });
                     }
-                }));
+                });
             });
         });
 
@@ -184,39 +277,172 @@
             }
             const transaction = db.transaction(collection);
             transaction.onerror = e => reject(e.target.errorCode);
-            // simple queries, where an index exists
             if (index) {
+                // lookup where an index exists
                 transaction.objectStore(collection).index(index).getAll(query[lookup]).onsuccess = e => resolve(e.target.result);
             } else if (lookup) {
+                // no index, so lookup directly using the provided query
                 transaction.objectStore(collection).get(query[lookup]).onsuccess = e => resolve(e.target.result);
             } else {
+                // no query provided, return all Records
                 transaction.objectStore(collection).getAll().onsuccess = e => resolve(e.target.result);
             }
         });
     </script>
-    <script>
+    <script id="eventHandlers">
         // event handlers
-        window.addEventListener('mousedown', function (e) {
+        window.addEventListener('mousedown', async function (e) {
             if (e.target.id == 'breakerList') {
                 const actX = e.clientX - e.target.offsetLeft;
                 const actY = e.clientY - e.target.offsetTop;
-                getRecord('breakers').then(breakers => {
-                    const breaker = breakers.filter(entry => {
-                        const { clickAreas } = entry;
-                        const hit = clickAreas.filter(([x0, y0, x1, y1]) => x0 < actX && actX < x1 && y0 < actY && actY < y1);
-                        return !!hit.length
-                    });
-                    if (breaker.length) {
-                        selectBreaker(breaker[0]);
+                const breakers = await getRecord('breakers');
+                const breaker = checkHit([actX, actY], breakers);
+                if (appState.activeMode == 'connecting') {
+                    // there was a component selected, so we're assigning a circuit
+                    const compToAssign = await getRecord('components', { id: appState.firstComponent });
+                    compToAssign.breaker = breaker.id;
+                    // reset the app state
+                    setState({ activeMode: 'add', firstComponent: '', highlightList: [] });
+                    await addRecord('components', [{ ...compToAssign }]);
+                    console.log('assign breaker calling for floor render')
+                    showComponents(appState.floorToShow);
+                } else {
+                    // just highlight the breaker
+                    if (breaker) {
+                        selectBreaker(breaker);
                     } else {
                         selectBreaker(false);
                     }
-                });
+                }
             }
             if (e.target.id == 'componentList') {
-                console.log('component click not available');
+                // listen to mouse clicks to add components
+                // use the activeType to set the component
+                const { activeFloor, activeMode, activeType } = { activeMode: 'add', activeType: 'outlet', ...appState };
+                const getZ = {
+                    'outlet': 18,
+                    'fixture': 108,
+                    'switch': 54
+                }
+                const defaultSettings = {
+                    breaker: false,
+                    gfci: false,
+                    numPoles: 1,
+                    isDimmed: false,
+                    switchedCircuit: []
+                }
+                // load the existing list
+                const components = await getRecord('components');
+                // figure out if we're clicking inside a component
+                const actX = e.clientX - e.target.offsetLeft;
+                const actY = e.clientY - e.target.offsetTop;
+                const actZ = getZ[activeType];
+                // get the clicked component, or undefined
+                const component = checkHit([actX, actY], components);
+                if (!component) {
+                    // on unused area:
+                    // dropOutlet, dropFixture, dropSwitch
+                    const newID = await addRecord('components', [{
+                        ...defaultSettings,
+                        type: activeType,
+                        floor: activeFloor,
+                        location: [actX, actY, actZ],
+                        clickAreas: [[actX - 2 * types[activeType].width, actY - 2 * types[activeType].height, actX + 2 * types[activeType].width, actY + 2 * types[activeType].height]]
+                    }], true);
+                    console.log(`new component ${newID} added`);
+                    console.log('new component drop calling for floor render');
+                    showFloor(appState.activeFloor);
+                } else {
+                    // if on component
+                    // if this is the first component, move to connecting state and store the component id
+                    if (appState.activeMode == 'add') {
+                        setState({ activeMode: 'connecting', firstComponent: component.id, highlightList: [component.id] });
+                        // redraw floor, will also update components
+                        console.log('selected component click handler calling for floor render');
+                        showFloor(appState.activeFloor);
+                    } else {
+                        // we are in connecting or edit mode
+                        if (component.id == appState.firstComponent) {
+                            // multiple click on the same component - activate edit mode
+                            editComponent(component);
+                            setState({ activeMode: 'edit' });
+                            // redraw floor, will also update components
+                            console.log('activate edit mode click handler calling for floor render');
+                            showFloor(appState.activeFloor);
+                        } else {
+                            // click on a new component 
+                            const firstComponent = await getRecord('components', { id: appState.firstComponent });
+                            // load the data from the first clicked component
+                            const updateFirst = { ...firstComponent };
+                            const updateCurrent = { ...component };
+                            const firstSwitched = new Set(updateFirst.switchedCircuit);
+                            const currentSwitched = new Set(component.switchedCircuit);
+                            let skipUpdate = false;
+                            if (appState.activeMode == 'edit') {
+                                // from edit mode, clicking on a component will remove it from switchedCircuit
+                                // and the firstComponent's ID from this component
+                                currentSwitched.delete(firstComponent.id);
+                                firstSwitched.delete(component.id);
+                                updateCurrent.switchedCircuit = [...currentSwitched];
+                                updateFirst.switchedCircuit = [...firstSwitched];
+                                // remain in edit mode until the close button clicked
+                            } else {
+                                // from connecting mode
+                                // connect two components
+                                // logical xor - if either is switch we're good to add it to the circuit
+                                if (component.type == 'switch' || firstComponent.type == 'switch') {
+                                    // add the current component (switch) to the last clicked one's switchedCircuit
+                                    currentSwitched.add(firstComponent.id);
+                                    updateCurrent.switchedCircuit = [...currentSwitched];
+                                    // also add the last clicked one's record to the current component (switch);
+                                    firstSwitched.add(component.id);
+                                    updateFirst.switchedCircuit = [...firstSwitched];
+                                    if (component.type == 'switch' && firstComponent.type == 'switch') {
+                                        // special case where two switches are clicked in succession, also update number of poles
+                                        // switch-switch, so put them on the same circuit and update the number of poles
+                                        updateFirst.numPoles = 2;
+                                        updateCurrent.numPoles = 2
+                                    }
+                                } else {
+                                    skipUpdate = true;
+                                    // for outlet-outlet, outlet-fixture, or fixture-fixture ignore and reset
+                                    // after one connection, revert to reset state
+                                }
+                            }
+                            if (!skipUpdate) {
+                                // switchedCircuit or numPoles is changed, update the first clicked component
+                                await addRecord('components', [{ ...updateFirst }, { ...updateCurrent }]);
+                                console.log('connected component calling for floor render');
+                                showFloor(appState.activeFloor)
+                            }
+                        }
+                        // assignCircuit -- see panel clickhandler
+                        setState({ activeMode: 'add', firstComponent: '', highlightList: [] });
+                    }
+                }
             }
         });
+        async function processEdit() {
+            // reset app state
+            setState({ activeMode: 'add', firstComponent: '', highlightList: [] });
+            // hide the form again
+            document.getElementById('editForm').hidden = true;
+
+            // now get the values and update the record
+            const id = document.getElementById('editForm').name;
+            const type = document.getElementById("typeField").value
+            const breaker = document.getElementById("breakerField").value == '' ? false : 1 * document.getElementById("breakerField").value;
+            const gfci = !!document.getElementById("gfciField").checked
+            const numPoles = 1 * document.getElementById("numPolesField").value || 1;
+            const isDimmed = !!document.getElementById("isDimmedField").checked
+
+            const result = await getRecord('components', { id });
+            const updated = { ...result, type, breaker, gfci, numPoles, isDimmed };
+            await addRecord('components', [{ ...updated }]);
+            // redraw the floor to get rid of highlighting and redraw shapes
+            console.log('processEdit calling for floor render');
+            showFloor(appState.activeFloor);
+        }
     </script>
     <style>
         .controlArea {
@@ -233,7 +459,7 @@
     <script>
         // intializing functions
 
-        function addBreakers(breakerList) {
+        async function addBreakers(breakerList) {
             // we'll store the slots in a map for later insertion, 
             // since there can only be one readwrite transaction open at a time
             const slots = new Map();
@@ -242,14 +468,13 @@
             const stdBreaker = { amps: 15, volts: 120, gfci: false };
 
             // now add each entry to the indexedDB
-            addRecord('breakers', breakerList.map(entry => ({ ...stdBreaker, ...entry }))).then(result => {
-                // result is an array of id's of updated or inserted records
-                result.map(breakerID => {
-                    const fullRecord = breakerList.get(breakerID);
-                    fullRecord.slots.forEach(slot => slots.set(slot, fullRecord.breaker));
-                });
-                addSlots([...slots])
-            })
+            const result = await addRecord('breakers', breakerList.map(entry => ({ ...stdBreaker, ...entry })));
+            // result is an array of id's of updated or inserted records
+            result.map(breakerID => {
+                const fullRecord = breakerList.get(breakerID);
+                fullRecord.slots.forEach(slot => slots.set(slot, fullRecord.breaker));
+            });
+            addSlots([...slots])
         }
 
         function addSlots(slotMap) {
@@ -273,15 +498,25 @@
     </script>
     <div class="controlArea">
         <button onclick="addBreakers(initBreakers)">Add Breakers</button>
-        <button onclick="showNextFloor(activeFloor)">Next Floor</button>
+        <button onclick="showFloor()">Next Floor</button>
     </div>
 
     <div class="displayArea">
         <canvas id="breakerList" style="position:absolute; top:100px;"></canvas>
         <canvas id="componentList" style="position:absolute; top:50px;"></canvas>
     </div>
+
+    <div id="editForm" class="editComponent" hidden="true">
+        <input id="typeField" type="text">
+        <input id="breakerField" type="number">
+        <input id="gfciField" type="checkbox" name="gfci">
+        <input id="numPolesField" type="number" name="numPoles">
+        <input id="isDimmedField" type="checkbox" name="dimmer">
+        <button onclick="processEdit()">OK</button>
+    </div>
+
     <script>
-        // Rendering Engine
+        // Rendering the Panel
 
         // panel element sizes on canvas
         const stdWidth = 65;
@@ -300,41 +535,31 @@
 
         function selectBreaker(breaker) {
             // redraw panel to clear old highlights
-            showRecords(breaker === false ? false : breaker.id);
+            showPanel(breaker === false ? false : breaker.id);
             //redraw components attached to this breaker
-            //showComponents(breaker.id);
+            console.log('selectBreaker calling for floor render');
+            const options = breaker === false ? {} : { breaker: breaker.id }
+            showFloor(appState.activeFloor, { ...options });
         }
 
-        async function showRecords(highlightID = false) {
+        async function showPanel(highlightID = false, forceReload = false) {
 
-            const getBoundingBox = extents => {
-                // first element x0 is left
-                const x0 = extents[0][0];
-                // width is (first element x1) - x0
-                const width = extents[0][2] - x0;
-                // min y is bottom
-                const yVals = extents.flatMap(entry => ([entry[1], entry[3]]));
-                const y0 = Math.min(...yVals);
-                // max y - y0 is height
-                const height = Math.max(...yVals) - y0;
-                return [x0, y0, width, height];
-            }
-
-            const shouldReload = !recordList;
+            const shouldReload = !recordList || forceReload;
             if (shouldReload) recordList = await getRecord('breakers', {});
 
             breakerContext.fillStyle = 'lightgrey';
             breakerContext.fillRect(0, 0, 20 + stdWidth + 30 + stdWidth + 20, boxHeight + 2 * stdHeight + 20);
 
             // note the origin for the panel is bottom left
-            // canvas origin is top left
+            // canvas origin is top left so this helper function will transform things properly
             const yPos = (breaker, offset) => boxHeight + 10 + stdHeight - (stdHeight * breaker + offset);
 
             // first fill in blank panel slots
 
             breakerContext.fillStyle = 'darkgrey';
             for (let num = 0; num <= 32; num++) {
-                breakerContext.font=`8px Verdana`;
+                breakerContext.font = `8px Verdana`;
+                breakerContext.textBaseline = 'alphabetic';
                 if (num % 2 == 0) {
                     breakerContext.textAlign = 'end';
                     breakerContext.fillRect(leftSide + 1, 1 + yPos(num, num == 1 ? -stdHeight : 0), stdWidth - 2, stdHeight - 2);
@@ -352,6 +577,7 @@
             // now draw over filled breakers
             breakerContext.strokeStyle = 'black';
             breakerContext.textAlign = 'center';
+            breakerContext.textBaseline = 'alphabetic';
             recordList.forEach(elem => {
                 const clickAreas = [];
                 elem.slot.forEach(slotName => {
@@ -389,40 +615,117 @@
                 });
                 if (shouldReload) elem.clickAreas = clickAreas;
             });
-            // now update all of the records with their mouse positions
-            if (shouldReload) addRecord('breakers', recordList).then(result => console.log('breakers updated'));
+            // now update all of the records with their mouse positions, if not already loaded
+            if (shouldReload) await addRecord('breakers', recordList);
         }
-        // components
-        function showNextFloor(prevFloor) {
-            activeFloor = prevFloor + 1 >= initFloors.length ? 0 : prevFloor + 1;
+    </script>
+    <script>
+        // Rendering Components
+        // panel element sizes on canvas
+
+        // global reference to this canvas, for convenience
+        const components = document.getElementById('componentList');
+        const componentContext = components.getContext('2d');
+
+
+        function showFloor(floorToShow = false, options = {}) {
+            const { activeFloor } = appState;
+            // if not provided with an argument, cycle to the next floor
+            const nextFloor = floorToShow===false ?
+                activeFloor + 1 >= initFloors.length ? 0 : activeFloor + 1
+                : floorToShow;
+            // clear highlighting if moving to a new floor
+            if (floorToShow == false) setState({highlightList:[]});
             let img = new Image();
-            img.src = initFloors[activeFloor].img;
+            img.src = initFloors[nextFloor].img;
             img.addEventListener('load', () => {
-                const components = document.getElementById('componentList');
                 components.height = img.height;
                 components.width = img.width;
                 components.style.left = `${20 + stdWidth + 30 + stdWidth + 20 + 15}px`;
-                const componentContext = components.getContext('2d');
                 // draw the base image
                 componentContext.drawImage(img, 0, 0);
                 componentContext.font = '64px Verdana';
                 componentContext.textAlign = 'center';
-                componentContext.fillText(initFloors[activeFloor].name, img.width / 2, 50);
-                // listen to mouse clicks to add components
-                // onClick, ask user what action they want to take
-                // on unused area:
-                // dropOutlet, dropFixture, dropSwitch
-                // if on component
-                // connectSwitch (2 clicks)
-                // assignCircuit
-                // editComponent
+                componentContext.textBaseline = 'alphabetic';
+                componentContext.fillText(initFloors[nextFloor].name, img.width / 2, 50);
+                // draw the existing components
+                showComponents({ floorToShow: nextFloor, ...options });
+                setState({ activeFloor: nextFloor });
             });
         }
 
-        showNextFloor(activeFloor);
-    </script>
-    <script>
+        async function showComponents(options) {
+            const { breaker, floorToShow, highlightList } = { breaker: false, floorToShow: appState.activeFloor, highlightList: appState.highlightList, ...options }
+            // first make a record of all components (filter by breaker if provided)
+            // switch to the floor where most of them are on
+            // draw the components
+            const query = breaker === false ? {} : { breaker }
+            const components = await getRecord('components', query);
+            // use type: "plug|switch|fixture" for base bitmap
+            // floor to vote for which floor to show,
+            // location: [x, y, z], to figure out where to draw it
+            // gfci: true, not used for the moment, maybe colour
+            // numPoles:0, show a little 3 for 2-pole switches
+            // isDimmed:false, maybe a colour for dimmed switches
+            components.forEach(component => {
+                const { type, floor, location, gfci, numPoles, isDimmed } = component;
+                if (highlightList.includes(component.id)) {
+                    componentContext.fillStyle = 'orange';
+                    // TODO: center it on the component
+                    componentContext.fillRect(...getBoundingBox(component.clickAreas));
+                }
+                let color = 'green';
+                let annotation = '';
+                if (floorToShow == floor) {
+                    switch (type) {
+                        case 'outlet': // draw a circle, for now
+                            if (gfci) { color = 'blue' }
+                            break;
+                        case 'switch': // draw a rectangle for now
+                            if (isDimmed) { color = 'lightred' }
+                            if (numPoles > 1) { annotation = '3' }
+                            break;
+                        case 'fixture': // draw a bigger circle, for now
+                            break;
+                        default: break;
+                    }
+                    types[type].img(componentContext, location, color, annotation);
+                }
+            });
+            // reset fillstyle
+            componentContext.fillStyle = 'black';
+        }
 
+        async function editComponent(compRecord) {
+            const {
+                id,
+                type,
+                breaker,
+                gfci,
+                numPoles,
+                isDimmed,
+                switchedCircuit
+            } = compRecord;
+            // show an edit window
+            const formNode = document.getElementById('editForm');
+            editForm.hidden = false;
+            editForm.name = id;
+            // now get the values and update the record
+            const component = await getRecord('components', { id });
+            document.getElementById("typeField").value = component.type;
+            document.getElementById("breakerField").value = component.breaker;
+            document.getElementById("gfciField").checked = component.gfci;
+            document.getElementById("numPolesField").value = component.numPoles;
+            document.getElementById("isDimmedField").checked = component.isDimmed;
+            // highlight switched circuits
+            if (switchedCircuit.length) {
+                const components = await getRecord('components', {})
+                const highlightList = components.filter(comp => comp.switchedCircuit.includes(id));
+                console.log('editComponent calling for floor render');
+                showFloor(appState.activeFloor, { highlightList });
+                setState({ highlightList });
+            }
+        }
     </script>
 </body>
 
