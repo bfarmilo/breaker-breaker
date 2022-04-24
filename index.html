@@ -47,6 +47,17 @@
             boundingBox: [x0, y0, x1,y1] //bounding box of room
         }] 
         */
+        const helpText = [
+            'Click on open area to drop a new outlet',
+            'Click on a component to select it in \'connecting\' mode',
+            'In connecting mode, click on the component again to activate \'edit\' mode and open the manual edit form',
+            'If a fixture is selected in connecting mode, clicking on a switch next will attach the switch to the fixture',
+            'If a switch is selected in connecting mode, clicking on a fixture next will attach the switch to the fixture',
+            'If a switch is selected in connecting mode, clicking on another switch will make both into 3-way (2 pole) switches',
+            'If a breaker is selected in connecting mode, the component will be assigned to that circuit',
+            'If the component is clicked again while in edit mode, the component will be removed from the switched circuit',
+            'Click on an empty part of a panel do de-select a breaker'
+        ];
         const initBreakers = [
             { slot: ['1A', '1B'], amps: 20 },
             { slot: ['2A', '2B'] },
@@ -100,12 +111,12 @@
                 height: 10,
                 img: (ctx, [x0, y0], color, annotation) => {
                     ctx.fillStyle = color;
-                    ctx.fillRect(x0, y0, 10, 10);
+                    ctx.fillRect(x0 - 10 / 2, y0 - 10 / 2, 10, 10);
                     if (annotation) {
                         ctx.font = '8px Verdana';
                         ctx.textAlign = 'start';
                         ctx.textBaseline = 'top';
-                        ctx.fillText(annotation, x0 + 10, y0 + 10,);
+                        ctx.fillText(annotation, x0 + 10 / 2, y0 + 10 / 2);
                     }
                 }
             },
@@ -119,11 +130,21 @@
                     ctx.arc(x0, y0, FIXTURE_RADIUS, 0, Math.PI * 2, true);
                     ctx.fill();
                 }
+            },
+            fan: {
+                name: 'fan',
+                width: FIXTURE_RADIUS,
+                height: FIXTURE_RADIUS,
+                img: (ctx, [x0, y0], color) => {
+                    ctx.fillStyle = color;
+                    ctx.fillRect(x0 - FIXTURE_RADIUS, y0 - FIXTURE_RADIUS, 2 * FIXTURE_RADIUS, 2 * FIXTURE_RADIUS);
+                }
             }
         };
         const appState = {
             activeFloor: 1,
             activeMode: 'add',
+            selectedBreaker: null,
             activeType: 'outlet',
             firstComponent: '',
             highlightList: []
@@ -265,6 +286,13 @@
             });
         });
 
+        const dropRecord = (collection, id) => new Promise((resolve, reject) => {
+            const dataStore = db.transaction(collection, "readwrite");
+            dataStore.oncomplete = e => resolve(id);
+            dataStore.onerror = e => reject(e.target.error);
+            dataStore.objectStore(collection).delete(id);
+        });
+
 
         const getRecord = (collection, query = {}) => new Promise((resolve, reject) => {
             let index;
@@ -291,8 +319,57 @@
     </script>
     <script id="eventHandlers">
         // event handlers
+        //Key press
+        window.addEventListener('keydown', async function (e) {
+            // only do something if we're in connecting mode
+            if (appState.activeMode == 'connecting') {
+                try {
+                    // load the selected component's full data record
+                    let compToMove = await getRecord('components', { id: appState.firstComponent });
+                    // if Escape, reset appState
+                    if (e.code == 'Escape') {
+                        // reset appState
+                        setState({ firstComponent: '', activeMode: 'add', highlightList: [] });
+                    }
+                    // if delete, delete it
+                    if (e.code == 'Delete') {
+                        // reset appState
+                        setState({ firstComponent: '', activeMode: 'add', highlightList: [] });
+                        await dropRecord('components', compToMove.id);
+                    } else {
+                        // arrow keys will move the component around by steps of 5 units
+                        let [x, y, z] = compToMove.location;
+                        switch (e.code) {
+                            case 'ArrowUp':
+                                y -= 5;
+                                break;
+                            case 'ArrowDown':
+                                y += 5;
+                                break;
+                            case 'ArrowRight':
+                                x += 5;
+                                break;
+                            case 'ArrowLeft':
+                                x -= 5;
+                                break;
+                        }
+                        const updatedID = await addRecord('components', [{
+                            ...compToMove,
+                            location: [x, y, z],
+                            clickAreas: [[x - 2 * types[compToMove.type].width, y - 2 * types[compToMove.type].height, x + 2 * types[compToMove.type].width, y + 2 * types[compToMove.type].height]]
+                        }]);
+                    }
+                    console.log('keyboard handler calling for floor render');
+                    showFloor(appState.activeFloor);
+                } catch (err) {
+                    console.error(err);
+                }
+            }
+        });
         window.addEventListener('mousedown', async function (e) {
+            // Clicked somewhere in the Panel
             if (e.target.id == 'breakerList') {
+                // clicked on the breaker panel, somewhere
                 const actX = e.clientX - e.target.offsetLeft;
                 const actY = e.clientY - e.target.offsetTop;
                 const breakers = await getRecord('breakers');
@@ -307,14 +384,12 @@
                     console.log('assign breaker calling for floor render')
                     showComponents(appState.floorToShow);
                 } else {
-                    // just highlight the breaker
-                    if (breaker) {
-                        selectBreaker(breaker);
-                    } else {
-                        selectBreaker(false);
-                    }
+                    // we're not in connecting mode, so
+                    // just highlight or toggle the breaker
+                    selectBreaker(breaker || false);
                 }
             }
+            // Clicked somewhere on the map
             if (e.target.id == 'componentList') {
                 // listen to mouse clicks to add components
                 // use the activeType to set the component
@@ -353,15 +428,17 @@
                     console.log('new component drop calling for floor render');
                     showFloor(appState.activeFloor);
                 } else {
-                    // if on component
+                    // on a component
                     // if this is the first component, move to connecting state and store the component id
                     if (appState.activeMode == 'add') {
-                        setState({ activeMode: 'connecting', firstComponent: component.id, highlightList: [component.id] });
+                        // add any switched circuits to highlight list as well
+                        const newHighlights = component.switchedCircuit ? [component.id].concat(component.switchedCircuit) : [component.id];
+                        setState({ activeType: component.type, activeMode: 'connecting', firstComponent: component.id, highlightList: newHighlights });
                         // redraw floor, will also update components
                         console.log('selected component click handler calling for floor render');
                         showFloor(appState.activeFloor);
                     } else {
-                        // we are in connecting or edit mode
+                        // we are in connecting or edit mode already
                         if (component.id == appState.firstComponent) {
                             // multiple click on the same component - activate edit mode
                             editComponent(component);
@@ -370,7 +447,7 @@
                             console.log('activate edit mode click handler calling for floor render');
                             showFloor(appState.activeFloor);
                         } else {
-                            // click on a new component 
+                            // second click is on a different component 
                             const firstComponent = await getRecord('components', { id: appState.firstComponent });
                             // load the data from the first clicked component
                             const updateFirst = { ...firstComponent };
@@ -405,7 +482,7 @@
                                     }
                                 } else {
                                     skipUpdate = true;
-                                    // for outlet-outlet, outlet-fixture, or fixture-fixture ignore and reset
+                                    // for outlet-outlet, outlet-fixture, fixture-fixture, fan-outlet, fan-fixture, or fan-fan ignore and reset
                                     // after one connection, revert to reset state
                                 }
                             }
@@ -507,11 +584,11 @@
     </div>
 
     <div id="editForm" class="editComponent" hidden="true">
-        <input id="typeField" type="text">
-        <input id="breakerField" type="number">
-        <input id="gfciField" type="checkbox" name="gfci">
-        <input id="numPolesField" type="number" name="numPoles">
-        <input id="isDimmedField" type="checkbox" name="dimmer">
+        <label for="typeField">Component Type:</label><input id="typeField" type="text">
+        <label for="breakerField">Breaker:</label><input id="breakerField" type="number">
+        <label for="gfciField">GFCI?</label><input id="gfciField" type="checkbox" name="gfci">
+        <label for="numPolesField">Poles:</label><input id="numPolesField" type="number" default=2 name="numPoles">
+        <label for="isDimmedField">Dimmer?</label><input id="isDimmedField" type="checkbox" name="dimmer">
         <button onclick="processEdit()">OK</button>
     </div>
 
@@ -534,11 +611,17 @@
         const breakerContext = breakers.getContext('2d');
 
         function selectBreaker(breaker) {
+            // set appstate accordingly
+            if (!breaker || appState.selectedBreaker == breaker.id) {
+                setState({ selectedBreaker: false });
+            } else {
+                setState({ selectedBreaker: breaker.id });
+            }
             // redraw panel to clear old highlights
-            showPanel(breaker === false ? false : breaker.id);
+            showPanel(appState.selectedBreaker);
             //redraw components attached to this breaker
             console.log('selectBreaker calling for floor render');
-            const options = breaker === false ? {} : { breaker: breaker.id }
+            const options = appState.selectedBreaker === false ? {} : { breaker: appState.selectedBreaker }
             showFloor(appState.activeFloor, { ...options });
         }
 
@@ -631,11 +714,11 @@
         function showFloor(floorToShow = false, options = {}) {
             const { activeFloor } = appState;
             // if not provided with an argument, cycle to the next floor
-            const nextFloor = floorToShow===false ?
+            const nextFloor = floorToShow === false ?
                 activeFloor + 1 >= initFloors.length ? 0 : activeFloor + 1
                 : floorToShow;
             // clear highlighting if moving to a new floor
-            if (floorToShow == false) setState({highlightList:[]});
+            if (floorToShow == false) setState({ highlightList: [] });
             let img = new Image();
             img.src = initFloors[nextFloor].img;
             img.addEventListener('load', () => {
